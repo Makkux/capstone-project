@@ -11,3 +11,1136 @@ index.html:
     <script type="module" src="/src/main.tsx"></script>
 </body>
 </html>
+
+src/index.css (theme variables):
+
+:root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --primary: 217.2 91.2% 59.8%;
+    --destructive: 0 84.2% 60.2%;
+    --bluetooth: 217.2 91.2% 59.8%;
+}
+
+.dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --destructive: 0 62.8% 30.6%;
+}
+src/main.tsx:
+import { createRoot } from 'react-dom/client';
+import App from './App.tsx';
+import './index.css';
+
+createRoot(document.getElementById("root")!).render(
+    <App />
+);
+src/App.tsx:
+import { Toaster } from "@/components/ui/toaster";
+import { Toaster as Sonner } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import Index from "./pages/Index";
+import NotFound from "./pages/NotFound";
+
+const queryClient = new QueryClient();
+
+const App = () => (
+    <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+            <Toaster />
+            <Sonner />
+            <BrowserRouter>
+                <Routes>
+                    <Route path="/" element={<Index />} />
+                    <Route path="*" element={<NotFound />} />
+                </Routes>
+            </BrowserRouter>
+        </TooltipProvider>
+    </QueryClientProvider>
+);
+
+export default App;
+src/components/BluetoothConnect.tsx:
+import { useCallback, useEffect, useRef, useState } from 'react';
+
+export const useSpeech = () => {
+    const [isSpeaking, setIsSpeaking] = useState(false);
+    const [isSupported, setIsSupported] = useState(false);
+    const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+
+    useEffect(() => {
+        setIsSupported('speechSynthesis' in window);
+    }, []);
+
+    const speak = useCallback(
+        (text: string, priority: 'high' | 'normal' = 'normal') => {
+            if (!isSupported) {
+                console.warn('Speech synthesis not supported');
+                return;
+            }
+            if (priority === 'high' && window.speechSynthesis.speaking) {
+                window.speechSynthesis.cancel();
+            }
+
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.rate = 1.0;
+            utterance.pitch = 1.0;
+            utterance.volume = 1.0;
+            utterance.lang = 'en-US';
+            utterance.onstart = () => setIsSpeaking(true);
+            utterance.onend = () => setIsSpeaking(false);
+            utterance.onerror = () => setIsSpeaking(false);
+
+            utteranceRef.current = utterance;
+            window.speechSynthesis.speak(utterance);
+        },
+        [isSupported]
+    );
+
+    const stop = useCallback(() => {
+        if (window.speechSynthesis.speaking) {
+            window.speechSynthesis.cancel();
+            setIsSpeaking(false);
+        }
+    }, []);
+
+    return { speak, stop, isSpeaking, isSupported };
+};
+src/hooks/useBluetooth.ts:
+import { useState, useCallback } from 'react';
+import { toast } from '@/hooks/use-toast';
+
+interface BluetoothDevice {
+    name: string;
+    id: string;
+}
+
+export const useBluetooth = (
+    onObstacleDetected: (currentInstruction?: string) => void,
+    getCurrentInstruction?: () => string | undefined
+) => {
+    const [device, setDevice] = useState<BluetoothDevice | null>(null);
+    const [isConnected, setIsConnected] = useState(false);
+    const [isScanning, setIsScanning] = useState(false);
+    const bleDeviceRef = useState<any>(null);
+
+    const connectToDevice = useCallback(async () => {
+        try {
+            setIsScanning(true);
+
+            const bleDevice = await navigator.bluetooth.requestDevice({
+                filters: [
+                    { namePrefix: 'ESP32' },
+                    { namePrefix: 'SmartStick' }
+                ],
+                optionalServices: ['4fafc201-1fb5-459e-8fcc-c5c9c331914b']
+            });
+
+            const server = await bleDevice.gatt?.connect();
+
+            if (!server) {
+                throw new Error('Failed to connect to GATT server');
+            }
+
+            const service = await server.getPrimaryService(
+                '4fafc201-1fb5-459e-8fcc-c5c9c331914b'
+            );
+
+            const characteristic = await service.getCharacteristic(
+                'beb5483e-36e1-4688-b7f5-ea07361b26a8'
+            );
+
+            await characteristic.startNotifications();
+
+            characteristic.addEventListener(
+                'characteristicvaluechanged',
+                (event: any) => {
+                    const value = event.target.value;
+                    const data = new TextDecoder().decode(value);
+
+                    if (data.includes('OBSTACLE') || data === '1') {
+                        const instruction = getCurrentInstruction?.();
+                        onObstacleDetected(instruction);
+                    }
+                }
+            );
+
+            bleDeviceRef[0] = bleDevice;
+
+            setDevice({
+                name: bleDevice.name || 'ESP32 Device',
+                id: bleDevice.id
+            });
+
+            setIsConnected(true);
+            setIsScanning(false);
+
+            toast({
+                title: 'Connected',
+                description: Connected to ${bleDevice.name || 'ESP32 Device'}
+            });
+
+            bleDevice.addEventListener('gattserverdisconnected', () => {
+                setIsConnected(false);
+                setDevice(null);
+
+                toast({
+                    title: 'Disconnected',
+                    description: 'Attempting to reconnect...',
+                    variant: 'destructive'
+                });
+
+                setTimeout(async () => {
+                    if (bleDeviceRef[0]) {
+                        try {
+                            await bleDeviceRef[0].gatt?.connect();
+
+                            toast({
+                                title: 'Reconnected',
+                                description:
+                                    'Successfully reconnected to SmartStick'
+                            });
+                        } catch (error) {
+                            console.error('Auto-reconnect failed:', error);
+                        }
+                    }
+                }, 2000);
+            });
+        } catch (error: any) {
+usespeech.ts :             
+console.error('Bluetooth connection error:', error);
+
+            toast({
+                title: 'Connection Failed',
+                description:
+                    error.message ||
+                    'Failed to connect to Bluetooth device',
+                variant: 'destructive'
+            });
+        }
+    }, [onObstacleDetected, getCurrentInstruction]);
+
+    const disconnect = useCallback(() => {
+        if (device) {
+            setDevice(null);
+            setIsConnected(false);
+
+            toast({
+                title: 'Disconnected',
+                description: 'Bluetooth device disconnected'
+            });
+        }
+    }, [device]);
+
+    return {
+        device,
+        isConnected,
+        isScanning,
+        connectToDevice,
+        disconnect
+    };
+};
+
+bledevice.id
+src/pages/Index.tsx:
+import { useState, useEffect, useCallback } from 'react';
+import { BluetoothConnect } from '@/components/BluetoothConnect';
+import { NavigationControl } from '@/components/NavigationControl';
+import { ObstacleAlert } from '@/components/ObstacleAlert';
+import { useSpeech } from '@/hooks/useSpeech';
+import { useBluetooth } from '@/hooks/useBluetooth';
+import { useNavigation } from '@/hooks/useNavigation';
+import { Card } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { toast } from '@/hooks/use-toast';
+import { Eye } from 'lucide-react';
+
+const Index = () => {
+    const [showObstacleAlert, setShowObstacleAlert] = useState(false);
+    const [lastObstacleTime, setLastObstacleTime] = useState(0);
+    const [hasAnnouncedArrival, setHasAnnouncedArrival] = useState(false);
+    const [lastAnnouncedDistance, setLastAnnouncedDistance] = useState(-1);
+
+    const { speak, isSpeaking, isSupported: isSpeechSupported } = useSpeech();
+
+    const handleObstacleDetected = useCallback(
+        (currentInstruction?: string) => {
+            const now = Date.now();
+            const cooldownPeriod = 5000;
+
+            if (now - lastObstacleTime < cooldownPeriod) {
+                return;
+            }
+
+            setLastObstacleTime(now);
+            setShowObstacleAlert(true);
+
+            let announcement = 'Obstacle ahead!';
+            if (currentInstruction) {
+                announcement += ${currentInstruction};
+            }
+
+            speak(announcement, 'high');
+
+            if (navigator.vibrate) {
+                navigator.vibrate([200, 100, 200]);
+            }
+        },
+        [speak, lastObstacleTime]
+    );
+
+    const {
+        isNavigating,
+        getCurrentLocation,
+        searchDestination,
+        getDirections,
+        startNavigation,
+        stopNavigation,
+        getCurrentStep,
+        nextStep,
+        distanceToNextTurn,
+        updateDistanceToNextTurn,
+        getAnnouncementText
+    } = useNavigation();
+
+    const currentStep = getCurrentStep();
+
+    const getCurrentInstruction = useCallback(() => {
+        const instruction = currentStep?.instruction?.toLowerCase() || '';
+
+        if (instruction.includes('turn left') || instruction.includes('left turn')) {
+            return 'turn left';
+        } else if (instruction.includes('turn right') || instruction.includes('right turn')) {
+            return 'turn right';
+        } else if (instruction.includes('keep left')) {
+            return 'keep left';
+        } else if (instruction.includes('keep right')) {
+            return 'keep right';
+        } else if (instruction.includes('straight') || instruction.includes('continue')) {
+            return 'go straight';
+        } else if (instruction.includes('u-turn')) {
+            return 'make a u-turn';
+        }
+
+        return undefined;
+    }, [currentStep]);
+
+    const { device, isConnected, isScanning, connectToDevice, disconnect } =
+        useBluetooth(handleObstacleDetected, getCurrentInstruction);
+
+    useEffect(() => {
+        if (isSpeechSupported) {
+            speak('GAB-AI Stick Website loaded. Welcome. Scanning for smart stick...');
+        }
+
+        const timer = setTimeout(() => {
+            if (!isConnected) {
+                connectToDevice();
+            }
+        }, 2000);
+
+        return () => clearTimeout(timer);
+    }, [isSpeechSupported, speak]);
+
+    useEffect(() => {
+        if (!isNavigating || !currentStep) return;
+
+        const updatePosition = async () => {
+            try {
+                await updateDistanceToNextTurn();
+                const meters = Math.round(distanceToNextTurn);
+
+                if (meters < 5) {
+                    const hasNext = nextStep();
+
+                    if (!hasNext && !hasAnnouncedArrival) {
+                        setHasAnnouncedArrival(true);
+                        speak('You have arrived at your destination!', 'normal');
+                        handleStopNavigation();
+                    }
+
+                    setLastAnnouncedDistance(-1);
+                    return;
+                }
+
+                const announcement = getAnnouncementText();
+
+                if (announcement && !isSpeaking) {
+                    const roundedDistance = Math.round(meters / 5) * 5;
+
+                    if (roundedDistance !== lastAnnouncedDistance && roundedDistance >= 0) {
+                        speak(announcement, 'normal');
+                        setLastAnnouncedDistance(roundedDistance);
+                    }
+                }
+            } catch (error) {
+                console.error('Error updating GPS position:', error);
+            }
+        };
+
+        const interval = setInterval(updatePosition, 1000);
+        updatePosition();
+
+        return () => clearInterval(interval);
+    }, [
+        isNavigating,
+        currentStep,
+        distanceToNextTurn,
+        isSpeaking,
+        getAnnouncementText,
+        speak,
+        nextStep,
+        updateDistanceToNextTurn,
+        hasAnnouncedArrival
+    ]);
+
+    const handleStartNavigation = async (destination: string) => {
+        setHasAnnouncedArrival(false);
+        setLastAnnouncedDistance(-1);
+        speak('Getting your location and calculating route...');
+
+        try {
+            const location = await getCurrentLocation();
+
+            if (!location) {
+                throw new Error('Could not get current location');
+            }
+
+            const dest = await searchDestination(destination);
+
+            if (!dest) {
+                throw new Error('Destination not found');
+            }
+
+            speak(Destination found: ${dest.name}. Calculating route...);
+
+            const route = await getDirections(location, {
+                lat: dest.lat,
+                lng: dest.lng
+            });
+
+            if (!route) {
+                throw new Error('Could not calculate route');
+            }
+
+            const totalMinutes = Math.round(route.totalDuration / 60);
+            const totalMeters = Math.round(route.totalDistance);
+
+            speak(
+                Route calculated. Total distance: ${totalMeters} meters. Estimated time: ${totalMinutes} minutes. Starting navigation.
+            );
+
+            startNavigation();
+
+            toast({
+                title: 'Navigation Started',
+                description: ${totalMeters}m • ${totalMinutes} min
+            });
+        } catch (error: any) {
+            speak('Navigation failed. ' + error.message);
+
+            toast({
+                title: 'Navigation Error',
+                description: error.message,
+                variant: 'destructive'
+            });
+        }
+    };
+
+    const handleStopNavigation = () => {
+        stopNavigation();
+        setHasAnnouncedArrival(false);
+        setLastAnnouncedDistance(-1);
+        speak('Navigation stopped.');
+
+        toast({ title: 'Navigation Stopped' });
+    };
+
+    return (
+        <main className="min-h-screen p-4 pb-20" role="main">
+            <ObstacleAlert isVisible={showObstacleAlert} />
+
+            <div className="max-w-2xl mx-auto space-y-6">
+                <header className="text-center py-6">
+                    <div className="flex items-center justify-center gap-3 mb-2">
+                        <Eye className="w-10 h-10 text-primary" aria-hidden="true" />
+                        <h1 className="text-4xl font-bold">GAB-AI Stick Website</h1>
+                    </div>
+                    <p className="text-xl text-muted-foreground">
+                        Voice-guided navigation for the visually impaired
+                    </p>
+                </header>
+
+                <section aria-label="Bluetooth Connection">
+                    <BluetoothConnect
+                        isConnected={isConnected}
+                        isScanning={isScanning}
+                        deviceName={device?.name}
+                        onConnect={connectToDevice}
+                        onDisconnect={disconnect}
+                    />
+                </section>
+
+                <section aria-label="Navigation Control">
+                    <NavigationControl
+                        onStartNavigation={handleStartNavigation}
+                        onStopNavigation={handleStopNavigation}
+                        isNavigating={isNavigating}
+                        currentStep={currentStep?.instruction}
+                    />
+                </section>
+
+                {isNavigating && currentStep && (
+                    <section aria-label="Navigation Progress">
+                        <Card className="p-6 border-2">
+                            <div className="space-y-4">
+                                <div>
+                                    <p className="text-lg text-muted-foreground">
+                                        Current instruction:
+                                    </p>
+                                    <p className="text-2xl font-bold mt-2">
+                                        {currentStep.instruction}
+                                    </p>
+                                </div>
+
+                                <div>
+                                    <p className="text-lg text-muted-foreground">
+                                        Distance to next turn:
+                                    </p>
+                                    <p className="text-4xl font-bold text-primary">
+                                        {Math.round(distanceToNextTurn)} meters
+                                    </p>
+                                </div>
+
+                                <p className="text-sm text-muted-foreground italic">
+                                    Navigation is automatic. Voice guidance will announce turns.
+                                </p>
+                            </div>
+                        </Card>
+                    </section>
+                )}
+            </div>
+        </main>
+    );
+};
+
+export default Index;
+
+dest.lat
+src/pages/Index.tsx:
+import { useState, useEffect, useCallback } from 'react';
+import { BluetoothConnect } from '@/components/BluetoothConnect';
+import { NavigationControl } from '@/components/NavigationControl';
+import { ObstacleAlert } from '@/components/ObstacleAlert';
+import { useSpeech } from '@/hooks/useSpeech';
+import { useBluetooth } from '@/hooks/useBluetooth';
+import { useNavigation } from '@/hooks/useNavigation';
+import { Card } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { toast } from '@/hooks/use-toast';
+import { Eye } from 'lucide-react';
+
+const Index = () => {
+    const [showObstacleAlert, setShowObstacleAlert] = useState(false);
+    const [lastObstacleTime, setLastObstacleTime] = useState(0);
+    const [hasAnnouncedArrival, setHasAnnouncedArrival] = useState(false);
+    const [lastAnnouncedDistance, setLastAnnouncedDistance] = useState(-1);
+
+    const { speak, isSpeaking, isSupported: isSpeechSupported } = useSpeech();
+
+    const handleObstacleDetected = useCallback(
+        (currentInstruction?: string) => {
+            const now = Date.now();
+            const cooldownPeriod = 5000;
+
+            if (now - lastObstacleTime < cooldownPeriod) return;
+
+            setLastObstacleTime(now);
+            setShowObstacleAlert(true);
+
+            let announcement = 'Obstacle ahead!';
+            if (currentInstruction) {
+                announcement += ${currentInstruction};
+            }
+
+            speak(announcement, 'high');
+
+            if (navigator.vibrate) {
+                navigator.vibrate([200, 100, 200]);
+            }
+        },
+        [speak, lastObstacleTime]
+    );
+
+    const {
+        isNavigating,
+        getCurrentLocation,
+        searchDestination,
+        getDirections,
+        startNavigation,
+        stopNavigation,
+        getCurrentStep,
+        nextStep,
+        distanceToNextTurn,
+        updateDistanceToNextTurn,
+        getAnnouncementText
+    } = useNavigation();
+
+    const currentStep = getCurrentStep();
+
+    const getCurrentInstruction = useCallback(() => {
+        const instruction = currentStep?.instruction?.toLowerCase() || '';
+
+        if (instruction.includes('turn left') || instruction.includes('left turn')) {
+            return 'turn left';
+        } else if (instruction.includes('turn right') || instruction.includes('right turn')) {
+            return 'turn right';
+        } else if (instruction.includes('keep left')) {
+            return 'keep left';
+        } else if (instruction.includes('keep right')) {
+            return 'keep right';
+        } else if (instruction.includes('straight') || instruction.includes('continue')) {
+            return 'go straight';
+        } else if (instruction.includes('u-turn')) {
+            return 'make a u-turn';
+        }
+
+        return undefined;
+    }, [currentStep]);
+
+    const { device, isConnected, isScanning, connectToDevice, disconnect } =
+        useBluetooth(handleObstacleDetected, getCurrentInstruction);
+
+    useEffect(() => {
+        if (isSpeechSupported) {
+            speak('GAB-AI Stick Website loaded. Welcome. Scanning for smart stick...');
+        }
+
+        const timer = setTimeout(() => {
+            if (!isConnected) connectToDevice();
+        }, 2000);
+
+        return () => clearTimeout(timer);
+    }, [isSpeechSupported, speak]);
+
+    useEffect(() => {
+        if (!isNavigating || !currentStep) return;
+
+        const updatePosition = async () => {
+            try {
+                await updateDistanceToNextTurn();
+                const meters = Math.round(distanceToNextTurn);
+
+                if (meters < 5) {
+                    const hasNext = nextStep();
+
+                    if (!hasNext && !hasAnnouncedArrival) {
+                        setHasAnnouncedArrival(true);
+                        speak('You have arrived at your destination!', 'normal');
+                        handleStopNavigation();
+                    }
+
+                    setLastAnnouncedDistance(-1);
+                    return;
+                }
+
+                const announcement = getAnnouncementText();
+
+                if (announcement && !isSpeaking) {
+                    const roundedDistance = Math.round(meters / 5) * 5;
+
+                    if (roundedDistance !== lastAnnouncedDistance && roundedDistance >= 0) {
+                        speak(announcement, 'normal');
+                        setLastAnnouncedDistance(roundedDistance);
+                    }
+                }
+            } catch (error) {
+                console.error('Error updating GPS position:', error);
+            }
+        };
+
+        const interval = setInterval(updatePosition, 1000);
+        updatePosition();
+
+        return () => clearInterval(interval);
+    }, [
+        isNavigating,
+        currentStep,
+        distanceToNextTurn,
+        isSpeaking,
+        getAnnouncementText,
+        speak,
+        nextStep,
+        updateDistanceToNextTurn,
+        hasAnnouncedArrival
+    ]);
+
+    const handleStartNavigation = async (destination: string) => {
+        setHasAnnouncedArrival(false);
+        setLastAnnouncedDistance(-1);
+        speak('Getting your location and calculating route...');
+
+        try {
+            const location = await getCurrentLocation();
+            if (!location) throw new Error('Could not get current location');
+
+            const dest = await searchDestination(destination);
+            if (!dest) throw new Error('Destination not found');
+
+            speak(Destination found: ${dest.name}. Calculating route...);
+
+            const route = await getDirections(location, {
+                lat: dest.lat,
+                lng: dest.lng
+            });
+
+            if (!route) throw new Error('Could not calculate route');
+
+            const totalMinutes = Math.round(route.totalDuration / 60);
+            const totalMeters = Math.round(route.totalDistance);
+
+            speak(
+                Route calculated. Total distance: ${totalMeters} meters. Estimated time: ${totalMinutes} minutes. Starting navigation.
+            );
+
+            startNavigation();
+
+            toast({
+                title: 'Navigation Started',
+                description: ${totalMeters}m • ${totalMinutes} min
+            });
+        } catch (error: any) {
+            speak('Navigation failed. ' + error.message);
+            toast({
+                title: 'Navigation Error',
+                description: error.message,
+                variant: 'destructive'
+            });
+        }
+    };
+
+    const handleStopNavigation = () => {
+        stopNavigation();
+        setHasAnnouncedArrival(false);
+        setLastAnnouncedDistance(-1);
+        speak('Navigation stopped.');
+        toast({ title: 'Navigation Stopped' });
+    };
+
+    return (
+        <main className="min-h-screen p-4 pb-20" role="main">
+            <ObstacleAlert isVisible={showObstacleAlert} />
+
+            <div className="max-w-2xl mx-auto space-y-6">
+                <header className="text-center py-6">
+                    <div className="flex items-center justify-center gap-3 mb-2">
+                        <Eye className="w-10 h-10 text-primary" aria-hidden="true" />
+                        <h1 className="text-4xl font-bold">GAB-AI Stick Website</h1>
+                    </div>
+                    <p className="text-xl text-muted-foreground">
+                        Voice-guided navigation for the visually impaired
+                    </p>
+                </header>
+
+                <section aria-label="Bluetooth Connection">
+                    <BluetoothConnect
+                        isConnected={isConnected}
+                        isScanning={isScanning}
+                        deviceName={device?.name}
+                        onConnect={connectToDevice}
+                        onDisconnect={disconnect}
+                    />
+                </section>
+
+                <section aria-label="Navigation Control">
+                    <NavigationControl
+                        onStartNavigation={handleStartNavigation}
+                        onStopNavigation={handleStopNavigation}
+                        isNavigating={isNavigating}
+                        currentStep={currentStep?.instruction}
+                    />
+                </section>
+
+                {isNavigating && currentStep && (
+                    <section aria-label="Navigation Progress">
+                        <Card className="p-6 border-2">
+                            <div className="space-y-4">
+                                <div>
+                                    <p className="text-lg text-muted-foreground">
+                                        Current instruction:
+                                    </p>
+                                    <p className="text-2xl font-bold mt-2">
+                                        {currentStep.instruction}
+                                    </p>
+                                </div>
+
+                                <div>
+                                    <p className="text-lg text-muted-foreground">
+                                        Distance to next turn:
+                                    </p>
+                                    <p className="text-4xl font-bold text-primary">
+                                        {Math.round(distanceToNextTurn)} meters
+                                    </p>
+                                </div>
+
+                                <p className="text-sm text-muted-foreground italic">
+                                    Navigation is automatic. Voice guidance will announce turns.
+                                </p>
+                            </div>
+                        </Card>
+                    </section>
+                )}
+            </div>
+        </main>
+    );
+};
+
+export default Index;
+
+dest.lat
+src/components/BluetoothConnect.tsx:
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import { Bluetooth, BluetoothConnected } from 'lucide-react';
+
+interface BluetoothConnectProps {
+    isConnected: boolean;
+    isScanning: boolean;
+    deviceName?: string;
+    onConnect: () => void;
+    onDisconnect: () => void;
+}
+
+export const BluetoothConnect = ({
+    isConnected,
+    isScanning,
+    deviceName,
+    onConnect,
+    onDisconnect
+}: BluetoothConnectProps) => {
+    return (
+        <Card className="p-6 border-2">
+            <div className="flex flex-col items-center gap-4">
+                {isConnected ? (
+                    <>
+                        <BluetoothConnected
+                            className="w-16 h-16 text-bluetooth"
+                            aria-hidden="true"
+                        />
+                        <h2 className="text-2xl font-bold text-center">
+                            Connected to Smart Stick
+                        </h2>
+                        <p className="text-lg text-center text-muted-foreground">
+                            {deviceName}
+                        </p>
+                        <Button
+                            onClick={onDisconnect}
+                            variant="destructive"
+                            size="lg"
+                            className="w-full min-h-[4rem] text-xl"
+                            aria-label="Disconnect from Smart Stick"
+                        >
+                            Disconnect
+                        </Button>
+                    </>
+                ) : (
+                    <>
+                        <Bluetooth
+                            className="w-16 h-16 text-bluetooth"
+                            aria-hidden="true"
+                        />
+                        <h2 className="text-2xl font-bold text-center">
+                            Connect Smart Stick
+                        </h2>
+                        <p className="text-lg text-center text-muted-foreground">
+                            Tap to connect your ESP32 smart stick via Bluetooth
+                        </p>
+                        <Button
+                            onClick={onConnect}
+                            disabled={isScanning}
+                            size="lg"
+                            className="w-full min-h-[4rem] text-xl"
+                            aria-label="Connect to Smart Stick via Bluetooth"
+                        >
+                            {isScanning ? 'Scanning...' : 'Connect Bluetooth'}
+                        </Button>
+                    </>
+                )}
+            </div>
+        </Card>
+    );
+};
+src/components/NavigationControl.tsx:
+import { useState } from 'react';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Navigation, Mic, Square } from 'lucide-react';
+import { toast } from '@/hooks/use-toast';
+import { useSpeech } from '@/hooks/useSpeech';
+
+interface NavigationControlProps {
+    onStartNavigation: (destination: string) => void;
+    onStopNavigation: () => void;
+    isNavigating: boolean;
+    currentStep?: string;
+}
+
+export const NavigationControl = ({
+    onStartNavigation,
+    onStopNavigation,
+    isNavigating,
+    currentStep
+}: NavigationControlProps) => {
+    const [destination, setDestination] = useState('');
+    const [isListening, setIsListening] = useState(false);
+    const { speak } = useSpeech();
+
+    const startVoiceInput = () => {
+        if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+            toast({
+                title: 'Not Supported',
+                description: 'Voice input is not supported on this device',
+                variant: 'destructive'
+            });
+            return;
+        }
+
+        const SpeechRecognition =
+            (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'en-US';
+        recognition.continuous = false;
+        recognition.interimResults = false;
+
+        recognition.onstart = () => {
+            setIsListening(true);
+        };
+
+        recognition.onresult = (event: any) => {
+            const transcript = event.results[0][0].transcript;
+            setDestination(transcript);
+            setIsListening(false);
+        };
+
+        recognition.onerror = () => {
+            setIsListening(false);
+            toast({
+                title: 'Error',
+                description: 'Failed to recognize speech',
+                variant: 'destructive'
+            });
+        };
+
+        recognition.onend = () => {
+            setIsListening(false);
+        };
+
+        recognition.start();
+    };
+
+    const handleStartNavigation = () => {
+        if (destination.trim()) {
+            onStartNavigation(destination);
+        } else {
+            toast({
+                title: 'Enter Destination',
+                description: 'Please enter a destination to start navigation',
+                variant: 'destructive'
+            });
+        }
+    };
+
+    if (isNavigating) {
+        return (
+            <Card className="p-6 border-2 bg-primary/10">
+                <div className="flex flex-col gap-4">
+                    <div className="flex items-center gap-3">
+                        <Navigation className="w-8 h-8 text-primary animate-pulse" aria-hidden="true" />
+                        <h2 className="text-2xl font-bold">Navigating</h2>
+                    </div>
+
+                    {currentStep && (
+                        <div className="p-4 bg-card rounded-lg border-2 border-primary">
+                            <p className="text-xl font-semibold leading-relaxed" role="status" aria-live="polite">
+                                {currentStep}
+                            </p>
+                        </div>
+                    )}
+
+                    <Button
+                        onClick={onStopNavigation}
+                        variant="destructive"
+                        size="lg"
+                        className="w-full min-h-[4rem] text-xl"
+                        aria-label="Stop Navigation"
+                    >
+                        <Square className="w-6 h-6 mr-2" aria-hidden="true" />
+                        Stop Navigation
+                    </Button>
+                </div>
+            </Card>
+        );
+    }
+
+    return (
+        <Card className="p-6 border-2">
+            <div className="flex flex-col gap-4">
+                <h2 className="text-2xl font-bold flex items-center gap-3">
+                    <Navigation className="w-8 h-8" aria-hidden="true" />
+                    Navigation
+                </h2>
+
+                <div className="flex gap-2">
+                    <Input
+                        type="text"
+                        placeholder="Enter destination..."
+                        value={destination}
+                        onChange={(e) => setDestination(e.target.value)}
+                        className="text-lg min-h-[3.5rem] flex-1"
+                        aria-label="Destination input"
+                    />
+                    <Button
+                        onClick={startVoiceInput}
+                        disabled={isListening}
+                        size="lg"
+                        variant="secondary"
+                        className="min-w-[4rem]"
+                        aria-label={isListening ? 'Listening...' : 'Use voice input'}
+                    >
+                        <Mic
+                            className={`w-6 h-6 ${
+                                isListening ? 'animate-pulse text-destructive' : 'text-bluetooth'
+                            }`}
+                            aria-hidden="true"
+                        />
+                    </Button>
+                </div>
+
+                <Button
+                    onClick={handleStartNavigation}
+                    size="lg"
+                    className="w-full min-h-[4rem] text-xl"
+                    aria-label="Start Navigation"
+                >
+                    Start Navigation
+                </Button>
+            </div>
+        </Card>
+    );
+};
+src/components/ObstacleAlert.tsx:
+import { useEffect, useState } from 'react';
+import { Card } from '@/components/ui/card';
+import { AlertTriangle } from 'lucide-react';
+
+interface ObstacleAlertProps {
+    isVisible: boolean;
+}
+
+export const ObstacleAlert = ({ isVisible }: ObstacleAlertProps) => {
+    const [show, setShow] = useState(false);
+
+    useEffect(() => {
+        if (isVisible) {
+            setShow(true);
+            const timer = setTimeout(() => setShow(false), 3000);
+            return () => clearTimeout(timer);
+        }
+    }, [isVisible]);
+
+    if (!show) return null;
+
+    return (
+        <Card
+            className="fixed top-4 left-1/2 -translate-x-1/2 z-50 p-6 bg-destructive border-4 border-destructive-foreground shadow-2xl animate-pulse"
+            role="alert"
+            aria-live="assertive"
+        >
+            <div className="flex items-center gap-4">
+                <AlertTriangle className="w-12 h-12 text-destructive-foreground" aria-hidden="true" />
+                <p className="text-2xl font-bold text-destructive-foreground">OBSTACLE AHEAD!</p>
+            </div>
+        </Card>
+    );
+};
+Arduino/ESP32 Firmware:
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+#define TRIG_PIN 5
+#define ECHO_PIN 18
+#define BUZZER_PIN 19
+#define OBSTACLE_THRESHOLD 40
+
+BLECharacteristic pCharacteristic;
+bool deviceConnected = false;
+
+class MyServerCallbacks : public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+        deviceConnected = true;
+    }
+
+    void onDisconnect(BLEServer* pServer) {
+        deviceConnected = false;
+        BLEDevice::startAdvertising();
+    }
+};
+
+void setup() {
+    Serial.begin(115200);
+
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
+    pinMode(BUZZER_PIN, OUTPUT);
+
+    BLEDevice::init("SmartStick");
+    BLEServer* pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+
+    BLEService* pService = pServer->createService("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
+
+    pCharacteristic = pService->createCharacteristic(
+        "beb5483e-36e1-4688-b7f5-ea07361b26a8",
+        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+    );
+    pCharacteristic->addDescriptor(new BLE2902());
+
+    pService->start();
+
+    BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
+    pAdvertising->start();
+}
+
+void loop() {
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+
+    long duration = pulseIn(ECHO_PIN, HIGH);
+    float distance = duration * 0.034 / 2;
+
+    if (distance < OBSTACLE_THRESHOLD && distance > 0) {
+        digitalWrite(BUZZER_PIN, HIGH);
+
+        if (deviceConnected) {
+            pCharacteristic.setValue("OBSTACLE");
+            pCharacteristic.notify();
+        }
+
+        delay(500);
+        digitalWrite(BUZZER_PIN, LOW);
+    }
+ delay(100);
+}
